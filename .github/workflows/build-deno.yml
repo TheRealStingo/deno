@@ -1,0 +1,102 @@
+name: Build and Release Deno Fork
+
+on:
+  push:
+    tags:
+      - "v*"  # Runs when a new tag like "v1.0" is pushed
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  build:
+    name: Build Deno (${{ matrix.os }} - ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+        arch: [x86_64, aarch64]
+        include:
+          - os: ubuntu-22.04
+            runner: ubuntu-latest
+            target: linux
+          - os: windows-2022
+            runner: windows-latest
+            target: windows
+
+    steps:
+      - name: Checkout Deno Fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for proper tagging
+          submodules: recursive
+
+      - name: Install Dependencies (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt update && sudo apt install -y build-essential clang python3 curl unzip
+
+      - name: Install Dependencies (Windows)
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          choco install -y python curl zip unzip llvm
+
+      - name: Set Up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu
+
+      - name: Install Node.js (For Deno Build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Build Deno
+        run: |
+          cargo build --release --target=${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu
+
+      - name: Package Executable (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          cp target/${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu/release/deno deno-${{ matrix.target }}-${{ matrix.arch }}
+          chmod +x deno-${{ matrix.target }}-${{ matrix.arch }}
+
+      - name: Package Executable (Windows)
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          Copy-Item target/${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu/release/deno.exe -Destination deno-${{ matrix.target }}-${{ matrix.arch }}.exe
+
+      - name: Upload Binaries as Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deno-${{ matrix.target }}-${{ matrix.arch }}
+          path: |
+            deno-${{ matrix.target }}-${{ matrix.arch }}*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release and Upload Binaries
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*  # Upload all built binaries
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: Deno Release ${{ github.ref_name }}
+          body: |
+            🚀 **Deno Fork Release - ${{ github.ref_name }}**
+            - Compiled for:
+              - ✅ Windows x86_64 & ARM (aarch64)
+              - ✅ Linux x86_64 & ARM (aarch64)
+          draft: false
+          prerelease: false

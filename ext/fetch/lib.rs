@@ -480,7 +480,8 @@ where
       permissions.check_net_url(&url, "fetch()")?;
 
       let maybe_authority = extract_authority(&mut url);
-      let uri = url
+      // Making Uri mutable to modify authority
+      let mut uri = url
         .as_str()
         .parse::<Uri>()
         .map_err(|_| FetchError::InvalidUrl(url.clone()))?;
@@ -529,13 +530,34 @@ where
         request.headers_mut().insert(CONTENT_LENGTH, len.into());
       }
 
+      // Preparing custom Host header for sniffing
+      let mut custom_host: Option<HeaderValue> = None;
+
       for (key, value) in headers {
         let name = HeaderName::from_bytes(&key)?;
         let v = HeaderValue::from_bytes(&value)?;
 
+        if name == HOST {
+          custom_host = Some(v.clone()); // Capture the custom Host header
+        }
+
         if (name != HOST || allow_host) && name != CONTENT_LENGTH {
           request.headers_mut().append(name, v);
         }
+      }
+
+      if allow_host {
+        custom_host
+          .as_ref()
+          .and_then(|host_value| host_value.to_str().ok()) // Convert HeaderValue to str
+          .and_then(|host_str| host_str.parse::<http::uri::Authority>().ok()) // Parse as Authority
+          .map(|new_authority| {
+            let mut parts = uri.into_parts();
+            parts.authority = Some(new_authority);
+            uri =
+              Uri::from_parts(parts).expect("Failed to set custom authority");
+            *request.uri_mut() = uri.clone();
+          });
       }
 
       if request.headers().contains_key(RANGE) {
