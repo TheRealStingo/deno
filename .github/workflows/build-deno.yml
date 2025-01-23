@@ -1,102 +1,111 @@
-name: Build and Release Deno Fork
+name: ci
+permissions:
+  contents: write
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - "v*"  # Runs when a new tag like "v1.0" is pushed
-  workflow_dispatch:  # Allows manual triggering
+      - '*'
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.head_ref || github.run_id }}'
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build Deno (${{ matrix.os }} - ${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    name: 'Build ${{ matrix.profile }} ${{ matrix.os }}-${{ matrix.arch }}'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash
 
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022]
-        arch: [x86_64, aarch64]
         include:
-          - os: ubuntu-22.04
-            runner: ubuntu-latest
-            target: linux
-          - os: windows-2022
-            runner: windows-latest
-            target: windows
+          - os: linux
+            arch: x86_64
+            job: test
+            profile: release
+          - os: linux
+            arch: aarch64
+            job: test
+            profile: release
+
+      fail-fast: false
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: full
 
     steps:
-      - name: Checkout Deno Fork
+      - name: Configure Git
+        run: |-
+          git config --global core.symlinks true
+          git config --global fetch.parallel 32
+
+      - name: Clone Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Needed for proper tagging
-          submodules: recursive
+          fetch-depth: 5
+          submodules: false
 
-      - name: Install Dependencies (Linux)
-        if: matrix.target == 'linux'
-        run: |
-          sudo apt update && sudo apt install -y build-essential clang python3 curl unzip
-
-      - name: Install Dependencies (Windows)
-        if: matrix.target == 'windows'
-        shell: pwsh
-        run: |
-          choco install -y python curl zip unzip llvm
-
-      - name: Set Up Rust
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu
+          targets: ${{ matrix.arch }}-unknown-linux-gnu
 
-      - name: Install Node.js (For Deno Build)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
+      - name: Build Release
+        run: |-
+          cargo build --release --locked --all-targets
+        env:
+          CARGO_PROFILE_DEV_DEBUG: 0
 
-      - name: Build Deno
-        run: |
-          cargo build --release --target=${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu
+      - name: Check Deno Binary
+        run: 'target/release/deno eval "console.log(1+2)" | grep 3'
+        env:
+          NO_COLOR: 1
 
-      - name: Package Executable (Linux)
-        if: matrix.target == 'linux'
-        run: |
-          cp target/${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu/release/deno deno-${{ matrix.target }}-${{ matrix.arch }}
-          chmod +x deno-${{ matrix.target }}-${{ matrix.arch }}
+      - name: Prepare Release Artifacts
+        run: |-
+          cd target/release
+          zip -r deno-${{ matrix.arch }}-linux.zip deno
+          shasum -a 256 deno-${{ matrix.arch }}-linux.zip > deno-${{ matrix.arch }}-linux.zip.sha256sum
+          strip denort
+          zip -r denort-${{ matrix.arch }}-linux.zip denort
+          shasum -a 256 denort-${{ matrix.arch }}-linux.zip > denort-${{ matrix.arch }}-linux.zip.sha256sum
 
-      - name: Package Executable (Windows)
-        if: matrix.target == 'windows'
-        shell: pwsh
-        run: |
-          Copy-Item target/${{ matrix.arch }}-unknown-${{ matrix.target }}-gnu/release/deno.exe -Destination deno-${{ matrix.target }}-${{ matrix.arch }}.exe
-
-      - name: Upload Binaries as Artifacts
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: deno-${{ matrix.target }}-${{ matrix.arch }}
-          path: |
-            deno-${{ matrix.target }}-${{ matrix.arch }}*
-          if-no-files-found: error
+          name: 'deno-${{ matrix.os }}-${{ matrix.arch }}'
+          path: target/release/deno-${{ matrix.arch }}-linux.zip
 
   release:
-    name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+    name: Publish Release
+    runs-on: ubuntu-24.04
+    needs:
+      - build
+    if: startsWith(github.ref, 'refs/tags/')
+
     steps:
-      - name: Download All Binaries
+      - name: Download Build Artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create Release and Upload Binaries
+      - name: Upload Release to GitHub
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         with:
-          files: artifacts/**/*  # Upload all built binaries
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ github.ref_name }}
-          name: Deno Release ${{ github.ref_name }}
-          body: |
-            🚀 **Deno Fork Release - ${{ github.ref_name }}**
-            - Compiled for:
-              - ✅ Windows x86_64 & ARM (aarch64)
-              - ✅ Linux x86_64 & ARM (aarch64)
+          files: artifacts/**
           draft: false
-          prerelease: false
